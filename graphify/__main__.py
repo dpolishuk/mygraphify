@@ -102,6 +102,11 @@ _PLATFORM_CONFIG: dict[str, dict] = {
         "skill_dst": Path(".kiro") / "skills" / "graphify" / "SKILL.md",
         "claude_md": False,
     },
+    "kimi": {
+        "skill_file": "skill.md",
+        "skill_dst": Path(".kimi") / "skills" / "graphify" / "SKILL.md",
+        "claude_md": False,
+    },
     "antigravity": {
         "skill_file": "skill.md",
         "skill_dst": Path(".agent") / "skills" / "graphify" / "SKILL.md",
@@ -118,6 +123,9 @@ _PLATFORM_CONFIG: dict[str, dict] = {
 def install(platform: str = "claude") -> None:
     if platform == "gemini":
         gemini_install()
+        return
+    if platform == "kimi":
+        kimi_install()
         return
     if platform == "cursor":
         _cursor_install(Path("."))
@@ -221,6 +229,25 @@ _GEMINI_HOOK = {
     ],
 }
 
+_KIMI_MD_SECTION = """\
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+"""
+
+_KIMI_MD_MARKER = "## graphify"
+
+_KIMI_HOOK_COMMAND = (
+    "[ -f graphify-out/graph.json ] && "
+    r"""echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md for god nodes and community structure before searching raw files."}}' """
+    "|| true"
+)
+
 
 def gemini_install(project_dir: Path | None = None) -> None:
     """Copy skill file to ~/.gemini/skills/graphify/, write GEMINI.md section, and install BeforeTool hook."""
@@ -280,6 +307,382 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
     settings["hooks"]["BeforeTool"] = filtered
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
+
+
+def _remove_hooks_inline_array(text: str) -> str:
+    """Remove the hooks = [...] inline array from raw TOML text."""
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    collecting = False
+    buffer: list[str] = []
+    for line in lines:
+        if not collecting and re.match(r"^[ \t]*hooks\s*=", line):
+            collecting = True
+            line = line.split("=", 1)[1]
+        if not collecting:
+            result.append(line)
+            continue
+        buffer.append(line)
+        content = "".join(buffer)
+        bracket_depth = 0
+        in_string = False
+        escape = False
+        for ch in content:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "[":
+                    bracket_depth += 1
+                elif ch == "]":
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        collecting = False
+                        buffer = []
+                        break
+    return "".join(result)
+
+
+def _extract_hooks_inline_array(text: str) -> str | None:
+    """Extract the raw content between the brackets of hooks = [...]."""
+    lines = text.splitlines(keepends=True)
+    buffer: list[str] = []
+    collecting = False
+    for line in lines:
+        if not collecting and re.match(r"^[ \t]*hooks\s*=", line):
+            collecting = True
+            line = line.split("=", 1)[1]
+        if not collecting:
+            continue
+        buffer.append(line)
+        # Check if we've reached the closing bracket outside of quotes
+        content = "".join(buffer)
+        bracket_depth = 0
+        in_string = False
+        escape = False
+        for ch in content:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "[":
+                    bracket_depth += 1
+                elif ch == "]":
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        # strip the surrounding [ ]
+                        inner = content[content.index("[") + 1 : content.rindex("]")]
+                        return inner
+    return None
+
+
+def _parse_inline_table(table_text: str) -> dict[str, str | int | bool] | None:
+    """Parse a TOML inline table {key = value, ...} without a parser."""
+    table_text = table_text.strip()
+    if not (table_text.startswith("{") and table_text.endswith("}")):
+        return None
+    inner = table_text[1:-1].strip()
+    if not inner:
+        return {}
+
+    result: dict[str, str | int | bool] = {}
+    # Split by top-level commas
+    parts: list[str] = []
+    depth = 0
+    in_string = False
+    escape = False
+    start = 0
+    for i, ch in enumerate(inner):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch in "({[":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append(inner[start:i].strip())
+                start = i + 1
+    parts.append(inner[start:].strip())
+
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, raw_val = part.split("=", 1)
+        key = key.strip()
+        raw_val = raw_val.strip()
+        if raw_val == "true":
+            result[key] = True
+        elif raw_val == "false":
+            result[key] = False
+        elif re.fullmatch(r"-?\d+", raw_val):
+            result[key] = int(raw_val)
+        elif raw_val.startswith('"') and raw_val.endswith('"'):
+            result[key] = json.loads(raw_val)
+        else:
+            result[key] = raw_val
+    return result
+
+
+def _convert_hooks_inline_array_to_blocks(text: str) -> str:
+    """Convert inline hooks = [...] to [[hooks]] blocks without a TOML parser."""
+    array_inner = _extract_hooks_inline_array(text)
+    if array_inner is None:
+        return text
+
+    # Split inner array content into individual { ... } tables
+    tables: list[str] = []
+    depth = 0
+    in_string = False
+    escape = False
+    start = 0
+    for i, ch in enumerate(array_inner):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    tables.append(array_inner[start : i + 1])
+
+    blocks: list[str] = []
+    for table_text in tables:
+        hook = _parse_inline_table(table_text)
+        if hook is None:
+            continue
+        block_lines = ["[[hooks]]"]
+        for key, value in hook.items():
+            if isinstance(value, str):
+                block_lines.append(f"{key} = {json.dumps(value)}")
+            elif isinstance(value, bool):
+                block_lines.append(f"{key} = {str(value).lower()}")
+            elif isinstance(value, int):
+                block_lines.append(f"{key} = {value}")
+            else:
+                block_lines.append(f"{key} = {json.dumps(str(value))}")
+        blocks.append("\n".join(block_lines))
+
+    if not blocks:
+        return text
+
+    text = _remove_hooks_inline_array(text)
+    text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
+    return text
+
+
+def _normalize_kimi_hooks_array(text: str) -> str:
+    """Convert any inline hooks = [...] array to [[hooks]] blocks."""
+    if not re.search(r"^[ \t]*hooks\s*=", text, flags=re.MULTILINE):
+        return text
+
+    parser = None
+    try:
+        import tomllib
+        parser = tomllib
+    except ImportError:
+        try:
+            import tomli
+            parser = tomli
+        except ImportError:
+            try:
+                import toml
+                parser = toml
+            except ImportError:
+                pass
+
+    if parser is not None:
+        try:
+            data = parser.loads(text)
+        except Exception:
+            return _convert_hooks_inline_array_to_blocks(text)
+
+        hooks = data.get("hooks")
+        if isinstance(hooks, list):
+            if not hooks:
+                return _remove_hooks_inline_array(text)
+            blocks = []
+            for hook in hooks:
+                if not isinstance(hook, dict):
+                    continue
+                block_lines = ["[[hooks]]"]
+                for key, value in hook.items():
+                    if isinstance(value, str):
+                        block_lines.append(f"{key} = {json.dumps(value)}")
+                    elif isinstance(value, bool):
+                        block_lines.append(f"{key} = {str(value).lower()}")
+                    elif isinstance(value, int):
+                        block_lines.append(f"{key} = {value}")
+                    else:
+                        block_lines.append(f"{key} = {json.dumps(str(value))}")
+                blocks.append("\n".join(block_lines))
+
+            if blocks:
+                text = _remove_hooks_inline_array(text)
+                text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
+                return text
+
+    # No parser available or parsing failed — use our lightweight converter
+    return _convert_hooks_inline_array_to_blocks(text)
+
+
+def _install_kimi_hook() -> None:
+    """Add graphify PreToolUse hook to ~/.kimi/config.toml."""
+    config_path = Path.home() / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hook_lines = (
+        '[[hooks]]\n'
+        'event = "PreToolUse"\n'
+        'matcher = "Glob|Grep"\n'
+        f'command = {json.dumps(_KIMI_HOOK_COMMAND)}\n'
+        'timeout = 10\n'
+        '# graphify-hook\n'
+    )
+
+    if not config_path.exists():
+        config_path.write_text(hook_lines, encoding="utf-8")
+        print("  ~/.kimi/config.toml  ->  PreToolUse hook registered")
+        return
+
+    text = config_path.read_text(encoding="utf-8")
+    if "# graphify-hook" in text:
+        print("  ~/.kimi/config.toml  ->  PreToolUse hook already registered (no change)")
+        return
+
+    # Normalize inline hooks = [...] arrays to [[hooks]] blocks to avoid mixed-type TOML
+    text = _normalize_kimi_hooks_array(text)
+    text = text.rstrip() + "\n\n" + hook_lines
+    config_path.write_text(text, encoding="utf-8")
+    print("  ~/.kimi/config.toml  ->  PreToolUse hook registered")
+
+
+def _uninstall_kimi_hook() -> None:
+    """Remove graphify PreToolUse hook from ~/.kimi/config.toml."""
+    config_path = Path.home() / ".kimi" / "config.toml"
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() == "[[hooks]]":
+            # Start of a hooks block - collect lines until the next table boundary
+            block_lines = [line]
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                stripped = next_line.strip()
+                if stripped.startswith("[[") or stripped.startswith("["):
+                    break
+                block_lines.append(next_line)
+                i += 1
+            if "# graphify-hook" not in "".join(block_lines):
+                result.extend(block_lines)
+            # i now points to the next table header or end-of-file
+        else:
+            result.append(line)
+            i += 1
+
+    cleaned = "".join(result)
+    if cleaned == text:
+        return
+    config_path.write_text(cleaned, encoding="utf-8")
+    print("  ~/.kimi/config.toml  ->  PreToolUse hook removed")
+
+
+def kimi_install(project_dir: Path | None = None) -> None:
+    """Copy skill file to ~/.kimi/skills/graphify/, write KIMI.md section, and install PreToolUse hook."""
+    skill_src = Path(__file__).parent / "skill.md"
+    skill_dst = Path.home() / ".kimi" / "skills" / "graphify" / "SKILL.md"
+    skill_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(skill_src, skill_dst)
+    (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
+    print(f"  skill installed  ->  {skill_dst}")
+
+    target = (project_dir or Path(".")) / "KIMI.md"
+
+    if target.exists():
+        content = target.read_text(encoding="utf-8")
+        if _KIMI_MD_MARKER in content:
+            print("graphify already configured in KIMI.md")
+        else:
+            target.write_text(content.rstrip() + "\n\n" + _KIMI_MD_SECTION, encoding="utf-8")
+            print(f"graphify section written to {target.resolve()}")
+    else:
+        target.write_text(_KIMI_MD_SECTION, encoding="utf-8")
+        print(f"graphify section written to {target.resolve()}")
+
+    _install_kimi_hook()
+    print()
+    print("Kimi CLI will now check the knowledge graph before answering")
+    print("codebase questions and rebuild it after code changes.")
+
+
+def kimi_uninstall(project_dir: Path | None = None) -> None:
+    """Remove the graphify section from KIMI.md, uninstall hook, and remove skill file."""
+    skill_dst = Path.home() / ".kimi" / "skills" / "graphify" / "SKILL.md"
+    if skill_dst.exists():
+        skill_dst.unlink()
+        print(f"  skill removed    ->  {skill_dst}")
+    version_file = skill_dst.parent / ".graphify_version"
+    if version_file.exists():
+        version_file.unlink()
+    for d in (skill_dst.parent, skill_dst.parent.parent):
+        try:
+            d.rmdir()
+        except OSError:
+            break
+
+    _uninstall_kimi_hook()
+
+    target = (project_dir or Path(".")) / "KIMI.md"
+    if not target.exists():
+        print("No KIMI.md found in current directory - nothing to do")
+        return
+    content = target.read_text(encoding="utf-8")
+    if _KIMI_MD_MARKER not in content:
+        print("graphify section not found in KIMI.md - nothing to do")
+        return
+    cleaned = re.sub(r"\n*## graphify\n.*?(?=\n## |\Z)", "", content, flags=re.DOTALL).rstrip()
+    if cleaned:
+        target.write_text(cleaned + "\n", encoding="utf-8")
+        print(f"graphify section removed from {target.resolve()}")
+    else:
+        target.unlink()
+        print(f"KIMI.md was empty after removal - deleted {target.resolve()}")
 
 
 def gemini_uninstall(project_dir: Path | None = None) -> None:
@@ -821,7 +1224,7 @@ def main() -> None:
         print("Usage: graphify <command>")
         print()
         print("Commands:")
-        print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro)")
+        print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|kimi)")
         print("  path \"A\" \"B\"            shortest path between two nodes in graph.json")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
         print("  explain \"X\"             plain-language explanation of a node and its neighbors")
@@ -849,6 +1252,8 @@ def main() -> None:
         print("  hook status             check if git hooks are installed")
         print("  gemini install          write GEMINI.md section + BeforeTool hook (Gemini CLI)")
         print("  gemini uninstall        remove GEMINI.md section + BeforeTool hook")
+        print("  kimi install            write KIMI.md section + PreToolUse hook (Kimi CLI)")
+        print("  kimi uninstall          remove KIMI.md section + PreToolUse hook")
         print("  cursor install          write .cursor/rules/graphify.mdc (Cursor)")
         print("  cursor uninstall        remove .cursor/rules/graphify.mdc")
         print("  claude install          write graphify section to CLAUDE.md + PreToolUse hook (Claude Code)")
@@ -912,6 +1317,15 @@ def main() -> None:
             gemini_uninstall()
         else:
             print("Usage: graphify gemini [install|uninstall]", file=sys.stderr)
+            sys.exit(1)
+    elif cmd == "kimi":
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        if subcmd == "install":
+            kimi_install()
+        elif subcmd == "uninstall":
+            kimi_uninstall()
+        else:
+            print("Usage: graphify kimi [install|uninstall]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "cursor":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""

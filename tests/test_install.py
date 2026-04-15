@@ -13,6 +13,7 @@ PLATFORMS = {
     "trae": (".trae/skills/graphify/SKILL.md",),
     "trae-cn": (".trae-cn/skills/graphify/SKILL.md",),
     "windows": (".claude/skills/graphify/SKILL.md",),
+    "kimi": (".kimi/skills/graphify/SKILL.md",),
 }
 
 
@@ -60,6 +61,12 @@ def test_install_trae_cn(tmp_path):
 def test_install_windows(tmp_path):
     _install(tmp_path, "windows")
     assert (tmp_path / ".claude" / "skills" / "graphify" / "SKILL.md").exists()
+
+
+def test_install_kimi(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _install(tmp_path, "kimi")
+    assert (tmp_path / ".kimi" / "skills" / "graphify" / "SKILL.md").exists()
 
 
 def test_install_unknown_platform_exits(tmp_path):
@@ -318,3 +325,218 @@ def test_gemini_uninstall_removes_hook(tmp_path):
 def test_gemini_uninstall_noop_if_not_installed(tmp_path):
     from graphify.__main__ import gemini_uninstall
     gemini_uninstall(tmp_path)  # should not raise
+
+
+# ── Kimi CLI ──────────────────────────────────────────────────────────────────
+
+def test_kimi_install_writes_kimi_md(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert md.exists()
+    assert "graphify-out/GRAPH_REPORT.md" in md.read_text()
+
+
+def test_kimi_install_writes_hook(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    config = (tmp_path / ".kimi" / "config.toml").read_text()
+    assert "[[hooks]]" in config
+    assert "PreToolUse" in config
+    assert "graphify" in config
+
+
+def test_kimi_install_idempotent(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_install(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert md.read_text().count("## graphify") == 1
+
+
+def test_kimi_install_merges_existing_kimi_md(tmp_path):
+    from graphify.__main__ import kimi_install
+    (tmp_path / "KIMI.md").write_text("# My project rules\n")
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    content = (tmp_path / "KIMI.md").read_text()
+    assert "# My project rules" in content
+    assert "graphify-out/GRAPH_REPORT.md" in content
+
+
+def test_kimi_uninstall_removes_section(tmp_path):
+    from graphify.__main__ import kimi_install, kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_uninstall(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert not md.exists()
+
+
+def test_kimi_uninstall_removes_hook(tmp_path):
+    from graphify.__main__ import kimi_install, kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_uninstall(tmp_path)
+    config_path = tmp_path / ".kimi" / "config.toml"
+    if config_path.exists():
+        config = config_path.read_text()
+        assert "graphify" not in config
+
+
+def test_kimi_uninstall_noop_if_not_installed(tmp_path):
+    from graphify.__main__ import kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_uninstall(tmp_path)  # should not raise
+
+
+def test_kimi_uninstall_preserves_trailing_toml_tables(tmp_path):
+    """Removing graphify hook must not delete [features] or other tables below it."""
+    from graphify.__main__ import _install_kimi_hook, _uninstall_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n\n'
+        '[features]\nmulti_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+        _uninstall_kimi_hook()
+    text = config_path.read_text()
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+    assert "# graphify-hook" not in text
+
+
+def test_kimi_uninstall_does_not_remove_unrelated_hooks(tmp_path):
+    """Only the hook carrying the # graphify-hook marker is removed."""
+    from graphify.__main__ import _install_kimi_hook, _uninstall_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        '[[hooks]]\n'
+        'event = "PostToolUse"\n'
+        'matcher = "WriteFile"\n'
+        'command = "graphify-helper"\n'
+        'timeout = 5\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+        _uninstall_kimi_hook()
+    text = config_path.read_text()
+    assert "graphify-helper" in text
+    assert "PostToolUse" in text
+    assert "# graphify-hook" not in text
+
+
+def test_kimi_install_normalizes_inline_hooks_array(tmp_path):
+    """Non-empty inline hooks = [...] is converted to [[hooks]] blocks before appending."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = [{event = "PostToolUse", matcher = "WriteFile", command = "black", timeout = 5}]\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert '[[hooks]]' in text
+    assert 'event = "PostToolUse"' in text
+    assert 'command = "black"' in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+
+
+def test_kimi_install_normalizes_inline_hooks_array_without_parser(tmp_path, monkeypatch):
+    """Fallback converter preserves existing hooks even when no TOML parser is available."""
+    import builtins
+    real_import = builtins.__import__
+
+    def no_toml_import(name, *args, **kwargs):
+        if name in ("tomllib", "tomli", "toml"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_toml_import)
+
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = [{event = "PostToolUse", matcher = "WriteFile", command = "black", timeout = 5}]\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert '[[hooks]]' in text
+    assert 'event = "PostToolUse"' in text
+    assert 'command = "black"' in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+
+
+def test_kimi_install_normalizes_empty_hooks_array(tmp_path):
+    """Empty hooks = [] is removed before appending the graphify hook."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = []\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+
+
+def test_kimi_install_handles_bracket_in_quoted_command(tmp_path):
+    """] inside a quoted command must not end the inline array prematurely."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = [\n'
+        '  {\n'
+        '    event = "PreToolUse",\n'
+        '    matcher = "Shell",\n'
+        '    command = "[ -f x ] && echo ok",\n'
+        '    timeout = 5\n'
+        '  }\n'
+        ']\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert 'command = "[ -f x ] && echo ok"' in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
