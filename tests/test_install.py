@@ -13,6 +13,7 @@ PLATFORMS = {
     "trae": (".trae/skills/graphify/SKILL.md",),
     "trae-cn": (".trae-cn/skills/graphify/SKILL.md",),
     "windows": (".claude/skills/graphify/SKILL.md",),
+    "kimi": (".kimi/skills/graphify/SKILL.md",),
 }
 
 
@@ -60,6 +61,11 @@ def test_install_trae_cn(tmp_path):
 def test_install_windows(tmp_path):
     _install(tmp_path, "windows")
     assert (tmp_path / ".claude" / "skills" / "graphify" / "SKILL.md").exists()
+
+
+def test_install_kimi(tmp_path):
+    _install(tmp_path, "kimi")
+    assert (tmp_path / ".kimi" / "skills" / "graphify" / "SKILL.md").exists()
 
 
 def test_install_unknown_platform_exits(tmp_path):
@@ -318,3 +324,69 @@ def test_gemini_uninstall_removes_hook(tmp_path):
 def test_gemini_uninstall_noop_if_not_installed(tmp_path):
     from graphify.__main__ import gemini_uninstall
     gemini_uninstall(tmp_path)  # should not raise
+
+
+# ── Kimi CLI ──────────────────────────────────────────────────────────────────
+
+def test_kimi_install_writes_kimi_md(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert md.exists()
+    assert "graphify-out/GRAPH_REPORT.md" in md.read_text()
+
+
+def test_kimi_install_writes_hook(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    config = (tmp_path / ".kimi" / "config.toml").read_text()
+    assert "[[hooks]]" in config
+    assert "PreToolUse" in config
+    assert "graphify" in config
+
+
+def test_kimi_install_idempotent(tmp_path):
+    from graphify.__main__ import kimi_install
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_install(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert md.read_text().count("## graphify") == 1
+
+
+def test_kimi_install_merges_existing_kimi_md(tmp_path):
+    from graphify.__main__ import kimi_install
+    (tmp_path / "KIMI.md").write_text("# My project rules\n")
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+    content = (tmp_path / "KIMI.md").read_text()
+    assert "# My project rules" in content
+    assert "graphify-out/GRAPH_REPORT.md" in content
+
+
+def test_kimi_uninstall_removes_section(tmp_path):
+    from graphify.__main__ import kimi_install, kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_uninstall(tmp_path)
+    md = tmp_path / "KIMI.md"
+    assert not md.exists()
+
+
+def test_kimi_uninstall_removes_hook(tmp_path):
+    from graphify.__main__ import kimi_install, kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_install(tmp_path)
+        kimi_uninstall(tmp_path)
+    config_path = tmp_path / ".kimi" / "config.toml"
+    if config_path.exists():
+        config = config_path.read_text()
+        assert "graphify" not in config
+
+
+def test_kimi_uninstall_noop_if_not_installed(tmp_path):
+    from graphify.__main__ import kimi_uninstall
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        kimi_uninstall(tmp_path)  # should not raise

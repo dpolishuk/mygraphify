@@ -102,6 +102,11 @@ _PLATFORM_CONFIG: dict[str, dict] = {
         "skill_dst": Path(".kiro") / "skills" / "graphify" / "SKILL.md",
         "claude_md": False,
     },
+    "kimi": {
+        "skill_file": "skill.md",
+        "skill_dst": Path(".kimi") / "skills" / "graphify" / "SKILL.md",
+        "claude_md": False,
+    },
     "antigravity": {
         "skill_file": "skill.md",
         "skill_dst": Path(".agent") / "skills" / "graphify" / "SKILL.md",
@@ -118,6 +123,9 @@ _PLATFORM_CONFIG: dict[str, dict] = {
 def install(platform: str = "claude") -> None:
     if platform == "gemini":
         gemini_install()
+        return
+    if platform == "kimi":
+        kimi_install()
         return
     if platform == "cursor":
         _cursor_install(Path("."))
@@ -221,6 +229,25 @@ _GEMINI_HOOK = {
     ],
 }
 
+_KIMI_MD_SECTION = """\
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+"""
+
+_KIMI_MD_MARKER = "## graphify"
+
+_KIMI_HOOK_COMMAND = (
+    "[ -f graphify-out/graph.json ] && "
+    r"""echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md for god nodes and community structure before searching raw files."}}' """
+    "|| true"
+)
+
 
 def gemini_install(project_dir: Path | None = None) -> None:
     """Copy skill file to ~/.gemini/skills/graphify/, write GEMINI.md section, and install BeforeTool hook."""
@@ -280,6 +307,126 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
     settings["hooks"]["BeforeTool"] = filtered
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
+
+
+def _install_kimi_hook() -> None:
+    """Add graphify PreToolUse hook to ~/.kimi/config.toml."""
+    config_path = Path.home() / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hook_lines = (
+        '[[hooks]]\n'
+        'event = "PreToolUse"\n'
+        'matcher = "Glob|Grep"\n'
+        f'command = "{_KIMI_HOOK_COMMAND}"\n'
+        'timeout = 10\n'
+    )
+
+    if not config_path.exists():
+        config_path.write_text(hook_lines, encoding="utf-8")
+        print("  ~/.kimi/config.toml  ->  PreToolUse hook registered")
+        return
+
+    text = config_path.read_text(encoding="utf-8")
+    if "graphify" in text and "PreToolUse" in text:
+        print("  ~/.kimi/config.toml  ->  PreToolUse hook already registered (no change)")
+        return
+
+    # Remove empty hooks = [] array to avoid mixed syntax issues
+    text = re.sub(r"\n?hooks\s*=\s*\[\]\n?", "\n", text)
+    text = text.rstrip() + "\n\n" + hook_lines
+    config_path.write_text(text, encoding="utf-8")
+    print("  ~/.kimi/config.toml  ->  PreToolUse hook registered")
+
+
+def _uninstall_kimi_hook() -> None:
+    """Remove graphify PreToolUse hook from ~/.kimi/config.toml."""
+    config_path = Path.home() / ".kimi" / "config.toml"
+    if not config_path.exists():
+        return
+    text = config_path.read_text(encoding="utf-8")
+
+    parts = re.split(r"(\n*\[\[hooks\]\]\n)", text)
+    result = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part.strip() == "[[hooks]]":
+            section = parts[i + 1] if i + 1 < len(parts) else ""
+            if "graphify" not in section:
+                result.append(part)
+                result.append(section)
+            i += 2
+        else:
+            result.append(part)
+            i += 1
+
+    cleaned = "".join(result)
+    if cleaned == text:
+        return
+    config_path.write_text(cleaned, encoding="utf-8")
+    print("  ~/.kimi/config.toml  ->  PreToolUse hook removed")
+
+
+def kimi_install(project_dir: Path | None = None) -> None:
+    """Copy skill file to ~/.kimi/skills/graphify/, write KIMI.md section, and install PreToolUse hook."""
+    skill_src = Path(__file__).parent / "skill.md"
+    skill_dst = Path.home() / ".kimi" / "skills" / "graphify" / "SKILL.md"
+    skill_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(skill_src, skill_dst)
+    (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
+    print(f"  skill installed  ->  {skill_dst}")
+
+    target = (project_dir or Path(".")) / "KIMI.md"
+
+    if target.exists():
+        content = target.read_text(encoding="utf-8")
+        if _KIMI_MD_MARKER in content:
+            print("graphify already configured in KIMI.md")
+        else:
+            target.write_text(content.rstrip() + "\n\n" + _KIMI_MD_SECTION, encoding="utf-8")
+            print(f"graphify section written to {target.resolve()}")
+    else:
+        target.write_text(_KIMI_MD_SECTION, encoding="utf-8")
+        print(f"graphify section written to {target.resolve()}")
+
+    _install_kimi_hook()
+    print()
+    print("Kimi CLI will now check the knowledge graph before answering")
+    print("codebase questions and rebuild it after code changes.")
+
+
+def kimi_uninstall(project_dir: Path | None = None) -> None:
+    """Remove the graphify section from KIMI.md, uninstall hook, and remove skill file."""
+    skill_dst = Path.home() / ".kimi" / "skills" / "graphify" / "SKILL.md"
+    if skill_dst.exists():
+        skill_dst.unlink()
+        print(f"  skill removed    ->  {skill_dst}")
+    version_file = skill_dst.parent / ".graphify_version"
+    if version_file.exists():
+        version_file.unlink()
+    for d in (skill_dst.parent, skill_dst.parent.parent):
+        try:
+            d.rmdir()
+        except OSError:
+            break
+
+    target = (project_dir or Path(".")) / "KIMI.md"
+    if not target.exists():
+        print("No KIMI.md found in current directory - nothing to do")
+        return
+    content = target.read_text(encoding="utf-8")
+    if _KIMI_MD_MARKER not in content:
+        print("graphify section not found in KIMI.md - nothing to do")
+        return
+    cleaned = re.sub(r"\n*## graphify\n.*?(?=\n## |\Z)", "", content, flags=re.DOTALL).rstrip()
+    if cleaned:
+        target.write_text(cleaned + "\n", encoding="utf-8")
+        print(f"graphify section removed from {target.resolve()}")
+    else:
+        target.unlink()
+        print(f"KIMI.md was empty after removal - deleted {target.resolve()}")
+    _uninstall_kimi_hook()
 
 
 def gemini_uninstall(project_dir: Path | None = None) -> None:
@@ -821,7 +968,7 @@ def main() -> None:
         print("Usage: graphify <command>")
         print()
         print("Commands:")
-        print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro)")
+        print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|kimi)")
         print("  path \"A\" \"B\"            shortest path between two nodes in graph.json")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
         print("  explain \"X\"             plain-language explanation of a node and its neighbors")
@@ -849,6 +996,8 @@ def main() -> None:
         print("  hook status             check if git hooks are installed")
         print("  gemini install          write GEMINI.md section + BeforeTool hook (Gemini CLI)")
         print("  gemini uninstall        remove GEMINI.md section + BeforeTool hook")
+        print("  kimi install            write KIMI.md section + PreToolUse hook (Kimi CLI)")
+        print("  kimi uninstall          remove KIMI.md section + PreToolUse hook")
         print("  cursor install          write .cursor/rules/graphify.mdc (Cursor)")
         print("  cursor uninstall        remove .cursor/rules/graphify.mdc")
         print("  claude install          write graphify section to CLAUDE.md + PreToolUse hook (Claude Code)")
@@ -912,6 +1061,15 @@ def main() -> None:
             gemini_uninstall()
         else:
             print("Usage: graphify gemini [install|uninstall]", file=sys.stderr)
+            sys.exit(1)
+    elif cmd == "kimi":
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        if subcmd == "install":
+            kimi_install()
+        elif subcmd == "uninstall":
+            kimi_uninstall()
+        else:
+            print("Usage: graphify kimi [install|uninstall]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "cursor":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
