@@ -313,21 +313,39 @@ def _remove_hooks_inline_array(text: str) -> str:
     """Remove the hooks = [...] inline array from raw TOML text."""
     lines = text.splitlines(keepends=True)
     result: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r"^[ \t]*hooks\s*=", line):
-            if "]" in line:
-                i += 1
-                continue
-            i += 1
-            while i < len(lines) and "]" not in lines[i]:
-                i += 1
-            if i < len(lines):
-                i += 1
-        else:
+    collecting = False
+    buffer: list[str] = []
+    for line in lines:
+        if not collecting and re.match(r"^[ \t]*hooks\s*=", line):
+            collecting = True
+            line = line.split("=", 1)[1]
+        if not collecting:
             result.append(line)
-            i += 1
+            continue
+        buffer.append(line)
+        content = "".join(buffer)
+        bracket_depth = 0
+        in_string = False
+        escape = False
+        for ch in content:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "[":
+                    bracket_depth += 1
+                elif ch == "]":
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        collecting = False
+                        buffer = []
+                        break
     return "".join(result)
 
 
@@ -509,7 +527,9 @@ def _normalize_kimi_hooks_array(text: str) -> str:
             return _convert_hooks_inline_array_to_blocks(text)
 
         hooks = data.get("hooks")
-        if isinstance(hooks, list) and hooks:
+        if isinstance(hooks, list):
+            if not hooks:
+                return _remove_hooks_inline_array(text)
             blocks = []
             for hook in hooks:
                 if not isinstance(hook, dict):

@@ -490,3 +490,53 @@ def test_kimi_install_normalizes_inline_hooks_array_without_parser(tmp_path, mon
     assert "# graphify-hook" in text
     assert "[features]" in text
     assert "multi_agent = true" in text
+
+
+def test_kimi_install_normalizes_empty_hooks_array(tmp_path):
+    """Empty hooks = [] is removed before appending the graphify hook."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = []\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+
+
+def test_kimi_install_handles_bracket_in_quoted_command(tmp_path):
+    """] inside a quoted command must not end the inline array prematurely."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = [\n'
+        '  {\n'
+        '    event = "PreToolUse",\n'
+        '    matcher = "Shell",\n'
+        '    command = "[ -f x ] && echo ok",\n'
+        '    timeout = 5\n'
+        '  }\n'
+        ']\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert 'command = "[ -f x ] && echo ok"' in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text
