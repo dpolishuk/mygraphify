@@ -331,8 +331,159 @@ def _remove_hooks_inline_array(text: str) -> str:
     return "".join(result)
 
 
+def _extract_hooks_inline_array(text: str) -> str | None:
+    """Extract the raw content between the brackets of hooks = [...]."""
+    lines = text.splitlines(keepends=True)
+    buffer: list[str] = []
+    collecting = False
+    for line in lines:
+        if not collecting and re.match(r"^[ \t]*hooks\s*=", line):
+            collecting = True
+            line = line.split("=", 1)[1]
+        if not collecting:
+            continue
+        buffer.append(line)
+        # Check if we've reached the closing bracket outside of quotes
+        content = "".join(buffer)
+        bracket_depth = 0
+        in_string = False
+        escape = False
+        for ch in content:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "[":
+                    bracket_depth += 1
+                elif ch == "]":
+                    bracket_depth -= 1
+                    if bracket_depth == 0:
+                        # strip the surrounding [ ]
+                        inner = content[content.index("[") + 1 : content.rindex("]")]
+                        return inner
+    return None
+
+
+def _parse_inline_table(table_text: str) -> dict[str, str | int | bool] | None:
+    """Parse a TOML inline table {key = value, ...} without a parser."""
+    table_text = table_text.strip()
+    if not (table_text.startswith("{") and table_text.endswith("}")):
+        return None
+    inner = table_text[1:-1].strip()
+    if not inner:
+        return {}
+
+    result: dict[str, str | int | bool] = {}
+    # Split by top-level commas
+    parts: list[str] = []
+    depth = 0
+    in_string = False
+    escape = False
+    start = 0
+    for i, ch in enumerate(inner):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch in "({[":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append(inner[start:i].strip())
+                start = i + 1
+    parts.append(inner[start:].strip())
+
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, raw_val = part.split("=", 1)
+        key = key.strip()
+        raw_val = raw_val.strip()
+        if raw_val == "true":
+            result[key] = True
+        elif raw_val == "false":
+            result[key] = False
+        elif re.fullmatch(r"-?\d+", raw_val):
+            result[key] = int(raw_val)
+        elif raw_val.startswith('"') and raw_val.endswith('"'):
+            result[key] = json.loads(raw_val)
+        else:
+            result[key] = raw_val
+    return result
+
+
+def _convert_hooks_inline_array_to_blocks(text: str) -> str:
+    """Convert inline hooks = [...] to [[hooks]] blocks without a TOML parser."""
+    array_inner = _extract_hooks_inline_array(text)
+    if array_inner is None:
+        return text
+
+    # Split inner array content into individual { ... } tables
+    tables: list[str] = []
+    depth = 0
+    in_string = False
+    escape = False
+    start = 0
+    for i, ch in enumerate(array_inner):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    tables.append(array_inner[start : i + 1])
+
+    blocks: list[str] = []
+    for table_text in tables:
+        hook = _parse_inline_table(table_text)
+        if hook is None:
+            continue
+        block_lines = ["[[hooks]]"]
+        for key, value in hook.items():
+            if isinstance(value, str):
+                block_lines.append(f"{key} = {json.dumps(value)}")
+            elif isinstance(value, bool):
+                block_lines.append(f"{key} = {str(value).lower()}")
+            elif isinstance(value, int):
+                block_lines.append(f"{key} = {value}")
+            else:
+                block_lines.append(f"{key} = {json.dumps(str(value))}")
+        blocks.append("\n".join(block_lines))
+
+    if not blocks:
+        return text
+
+    text = _remove_hooks_inline_array(text)
+    text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
+    return text
+
+
 def _normalize_kimi_hooks_array(text: str) -> str:
-    """Convert any inline hooks = [...] array to [[hooks]] blocks if a TOML parser is available."""
+    """Convert any inline hooks = [...] array to [[hooks]] blocks."""
     if not re.search(r"^[ \t]*hooks\s*=", text, flags=re.MULTILINE):
         return text
 
@@ -351,40 +502,37 @@ def _normalize_kimi_hooks_array(text: str) -> str:
             except ImportError:
                 pass
 
-    if parser is None:
-        return _remove_hooks_inline_array(text)
+    if parser is not None:
+        try:
+            data = parser.loads(text)
+        except Exception:
+            return _convert_hooks_inline_array_to_blocks(text)
 
-    try:
-        data = parser.loads(text)
-    except Exception:
-        return _remove_hooks_inline_array(text)
+        hooks = data.get("hooks")
+        if isinstance(hooks, list) and hooks:
+            blocks = []
+            for hook in hooks:
+                if not isinstance(hook, dict):
+                    continue
+                block_lines = ["[[hooks]]"]
+                for key, value in hook.items():
+                    if isinstance(value, str):
+                        block_lines.append(f"{key} = {json.dumps(value)}")
+                    elif isinstance(value, bool):
+                        block_lines.append(f"{key} = {str(value).lower()}")
+                    elif isinstance(value, int):
+                        block_lines.append(f"{key} = {value}")
+                    else:
+                        block_lines.append(f"{key} = {json.dumps(str(value))}")
+                blocks.append("\n".join(block_lines))
 
-    hooks = data.get("hooks")
-    if not isinstance(hooks, list) or not hooks:
-        return _remove_hooks_inline_array(text)
+            if blocks:
+                text = _remove_hooks_inline_array(text)
+                text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
+                return text
 
-    blocks = []
-    for hook in hooks:
-        if not isinstance(hook, dict):
-            continue
-        block_lines = ["[[hooks]]"]
-        for key, value in hook.items():
-            if isinstance(value, str):
-                block_lines.append(f"{key} = {json.dumps(value)}")
-            elif isinstance(value, bool):
-                block_lines.append(f"{key} = {str(value).lower()}")
-            elif isinstance(value, int):
-                block_lines.append(f"{key} = {value}")
-            else:
-                block_lines.append(f"{key} = {json.dumps(str(value))}")
-        blocks.append("\n".join(block_lines))
-
-    if not blocks:
-        return _remove_hooks_inline_array(text)
-
-    text = _remove_hooks_inline_array(text)
-    text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
-    return text
+    # No parser available or parsing failed — use our lightweight converter
+    return _convert_hooks_inline_array_to_blocks(text)
 
 
 def _install_kimi_hook() -> None:
