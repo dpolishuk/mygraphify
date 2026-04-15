@@ -391,3 +391,44 @@ def test_kimi_uninstall_noop_if_not_installed(tmp_path):
     from graphify.__main__ import kimi_uninstall
     with patch("graphify.__main__.Path.home", return_value=tmp_path):
         kimi_uninstall(tmp_path)  # should not raise
+
+
+def test_kimi_uninstall_preserves_trailing_toml_tables(tmp_path):
+    """Removing graphify hook must not delete [features] or other tables below it."""
+    from graphify.__main__ import _install_kimi_hook, _uninstall_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n\n'
+        '[features]\nmulti_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+        _uninstall_kimi_hook()
+    text = config_path.read_text()
+    assert "[features]" in text
+    assert "multi_agent = true" in text
+    assert "# graphify-hook" not in text
+
+
+def test_kimi_uninstall_does_not_remove_unrelated_hooks(tmp_path):
+    """Only the hook carrying the # graphify-hook marker is removed."""
+    from graphify.__main__ import _install_kimi_hook, _uninstall_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        '[[hooks]]\n'
+        'event = "PostToolUse"\n'
+        'matcher = "WriteFile"\n'
+        'command = "graphify-helper"\n'
+        'timeout = 5\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+        _uninstall_kimi_hook()
+    text = config_path.read_text()
+    assert "graphify-helper" in text
+    assert "PostToolUse" in text
+    assert "# graphify-hook" not in text

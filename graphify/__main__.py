@@ -347,19 +347,27 @@ def _uninstall_kimi_hook() -> None:
         return
     text = config_path.read_text(encoding="utf-8")
 
-    parts = re.split(r"(\n*\[\[hooks\]\]\n)", text)
-    result = []
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
     i = 0
-    while i < len(parts):
-        part = parts[i]
-        if part.strip() == "[[hooks]]":
-            section = parts[i + 1] if i + 1 < len(parts) else ""
-            if "graphify" not in section:
-                result.append(part)
-                result.append(section)
-            i += 2
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() == "[[hooks]]":
+            # Start of a hooks block - collect lines until the next table boundary
+            block_lines = [line]
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                stripped = next_line.strip()
+                if stripped.startswith("[[") or stripped.startswith("["):
+                    break
+                block_lines.append(next_line)
+                i += 1
+            if "# graphify-hook" not in "".join(block_lines):
+                result.extend(block_lines)
+            # i now points to the next table header or end-of-file
         else:
-            result.append(part)
+            result.append(line)
             i += 1
 
     cleaned = "".join(result)
