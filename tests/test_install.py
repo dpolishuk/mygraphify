@@ -432,3 +432,27 @@ def test_kimi_uninstall_does_not_remove_unrelated_hooks(tmp_path):
     assert "graphify-helper" in text
     assert "PostToolUse" in text
     assert "# graphify-hook" not in text
+
+
+def test_kimi_install_normalizes_inline_hooks_array(tmp_path):
+    """Non-empty inline hooks = [...] is converted to [[hooks]] blocks before appending."""
+    from graphify.__main__ import _install_kimi_hook
+    config_path = tmp_path / ".kimi" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        'default_model = "kimi-for-coding"\n'
+        'hooks = [{event = "PostToolUse", matcher = "WriteFile", command = "black", timeout = 5}]\n'
+        '[features]\n'
+        'multi_agent = true\n',
+        encoding="utf-8",
+    )
+    with patch("graphify.__main__.Path.home", return_value=tmp_path):
+        _install_kimi_hook()
+    text = config_path.read_text()
+    assert "hooks = " not in text
+    assert '[[hooks]]' in text
+    assert 'event = "PostToolUse"' in text
+    assert 'command = "black"' in text
+    assert "# graphify-hook" in text
+    assert "[features]" in text
+    assert "multi_agent = true" in text

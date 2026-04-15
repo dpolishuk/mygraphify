@@ -309,6 +309,84 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
 
 
+def _remove_hooks_inline_array(text: str) -> str:
+    """Remove the hooks = [...] inline array from raw TOML text."""
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r"^[ \t]*hooks\s*=", line):
+            if "]" in line:
+                i += 1
+                continue
+            i += 1
+            while i < len(lines) and "]" not in lines[i]:
+                i += 1
+            if i < len(lines):
+                i += 1
+        else:
+            result.append(line)
+            i += 1
+    return "".join(result)
+
+
+def _normalize_kimi_hooks_array(text: str) -> str:
+    """Convert any inline hooks = [...] array to [[hooks]] blocks if a TOML parser is available."""
+    if not re.search(r"^[ \t]*hooks\s*=", text, flags=re.MULTILINE):
+        return text
+
+    parser = None
+    try:
+        import tomllib
+        parser = tomllib
+    except ImportError:
+        try:
+            import tomli
+            parser = tomli
+        except ImportError:
+            try:
+                import toml
+                parser = toml
+            except ImportError:
+                pass
+
+    if parser is None:
+        return _remove_hooks_inline_array(text)
+
+    try:
+        data = parser.loads(text)
+    except Exception:
+        return _remove_hooks_inline_array(text)
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, list) or not hooks:
+        return _remove_hooks_inline_array(text)
+
+    blocks = []
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            continue
+        block_lines = ["[[hooks]]"]
+        for key, value in hook.items():
+            if isinstance(value, str):
+                block_lines.append(f"{key} = {json.dumps(value)}")
+            elif isinstance(value, bool):
+                block_lines.append(f"{key} = {str(value).lower()}")
+            elif isinstance(value, int):
+                block_lines.append(f"{key} = {value}")
+            else:
+                block_lines.append(f"{key} = {json.dumps(str(value))}")
+        blocks.append("\n".join(block_lines))
+
+    if not blocks:
+        return _remove_hooks_inline_array(text)
+
+    text = _remove_hooks_inline_array(text)
+    text = text.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n"
+    return text
+
+
 def _install_kimi_hook() -> None:
     """Add graphify PreToolUse hook to ~/.kimi/config.toml."""
     config_path = Path.home() / ".kimi" / "config.toml"
@@ -333,8 +411,8 @@ def _install_kimi_hook() -> None:
         print("  ~/.kimi/config.toml  ->  PreToolUse hook already registered (no change)")
         return
 
-    # Remove empty hooks = [] array to avoid mixed syntax issues
-    text = re.sub(r"\n?hooks\s*=\s*\[\]\n?", "\n", text)
+    # Normalize inline hooks = [...] arrays to [[hooks]] blocks to avoid mixed-type TOML
+    text = _normalize_kimi_hooks_array(text)
     text = text.rstrip() + "\n\n" + hook_lines
     config_path.write_text(text, encoding="utf-8")
     print("  ~/.kimi/config.toml  ->  PreToolUse hook registered")
