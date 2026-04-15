@@ -318,8 +318,9 @@ def _install_kimi_hook() -> None:
         '[[hooks]]\n'
         'event = "PreToolUse"\n'
         'matcher = "Glob|Grep"\n'
-        f'command = "{_KIMI_HOOK_COMMAND}"\n'
+        f'command = {json.dumps(_KIMI_HOOK_COMMAND)}\n'
         'timeout = 10\n'
+        '# graphify-hook\n'
     )
 
     if not config_path.exists():
@@ -328,7 +329,7 @@ def _install_kimi_hook() -> None:
         return
 
     text = config_path.read_text(encoding="utf-8")
-    if "graphify" in text and "PreToolUse" in text:
+    if "# graphify-hook" in text:
         print("  ~/.kimi/config.toml  ->  PreToolUse hook already registered (no change)")
         return
 
@@ -411,6 +412,8 @@ def kimi_uninstall(project_dir: Path | None = None) -> None:
         except OSError:
             break
 
+    _uninstall_kimi_hook()
+
     target = (project_dir or Path(".")) / "KIMI.md"
     if not target.exists():
         print("No KIMI.md found in current directory - nothing to do")
@@ -426,7 +429,6 @@ def kimi_uninstall(project_dir: Path | None = None) -> None:
     else:
         target.unlink()
         print(f"KIMI.md was empty after removal - deleted {target.resolve()}")
-    _uninstall_kimi_hook()
 
 
 def gemini_uninstall(project_dir: Path | None = None) -> None:

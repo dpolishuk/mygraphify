@@ -63,7 +63,8 @@ def test_install_windows(tmp_path):
     assert (tmp_path / ".claude" / "skills" / "graphify" / "SKILL.md").exists()
 
 
-def test_install_kimi(tmp_path):
+def test_install_kimi(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     _install(tmp_path, "kimi")
     assert (tmp_path / ".kimi" / "skills" / "graphify" / "SKILL.md").exists()
 
